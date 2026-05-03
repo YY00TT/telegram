@@ -480,6 +480,24 @@ async function handlePrivateMessage(msg, env, ctx) {
   }
 
   const isBanned = await env.TOPIC_MAP.get(`banned:${userId}`);
+  // --- 新增：关键词拦截逻辑 ---
+  const userText = (msg.text || msg.caption || "").toLowerCase();
+  const badWords = await safeGetJSON(env, "CONFIG_KEYWORDS", []);
+  const triggeredWord = badWords.find(word => userText.includes(word.toLowerCase()));
+
+  if (triggeredWord) {
+      // 1. 立即拉黑用户
+      await env.TOPIC_MAP.put(`banned:${userId}`, "1");
+      
+      // 2. 通知管理员
+      const adminNotice = `🚫 **自动封禁通知**\n\n用户: \`${userId}\`\n原因: 触发关键词 [${triggeredWord}]\n内容: \`${userText}\``;
+      await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, text: adminNotice, parse_mode: "Markdown" });
+      
+      // 3. 记录日志并拦截
+      Logger.warn('auto_banned_by_keyword', { userId, triggeredWord });
+      return; 
+  }
+  // --- 拦截逻辑结束 ---
   if (isBanned) return;
 
   const verified = await env.TOPIC_MAP.get(`verified:${userId}`);
@@ -798,6 +816,43 @@ async function handleAdminReply(msg, env, ctx) {
       await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: info, parse_mode: "Markdown" });
       return;
   }
+  // --- 新增：关键词库管理指令 ---
+  if (text.startsWith("/addword ")) {
+      const word = text.replace("/addword ", "").trim();
+      if (!word) return;
+      let words = await safeGetJSON(env, "CONFIG_KEYWORDS", []);
+      if (!words.includes(word)) {
+          words.push(word);
+          await env.TOPIC_MAP.put("CONFIG_KEYWORDS", JSON.stringify(words));
+          await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `✅ 已添加屏蔽词: ${word}` });
+      } else {
+          await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `ℹ️ 该词已在列表中` });
+      }
+      return;
+  }
+
+  if (text.startsWith("/delword ")) {
+      const word = text.replace("/delword ", "").trim();
+      if (!word) return;
+      let words = await safeGetJSON(env, "CONFIG_KEYWORDS", []);
+      const index = words.indexOf(word);
+      if (index > -1) {
+          words.splice(index, 1);
+          await env.TOPIC_MAP.put("CONFIG_KEYWORDS", JSON.stringify(words));
+          await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `🗑️ 已删除屏蔽词: ${word}` });
+      } else {
+          await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `❌ 未找到该词` });
+      }
+      return;
+  }
+
+  if (text === "/listwords") {
+      let words = await safeGetJSON(env, "CONFIG_KEYWORDS", []);
+      const list = words.length > 0 ? words.join("\n") : "空";
+      await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `🚫 **当前屏蔽词列表：**\n\n${list}`, parse_mode: "Markdown" });
+      return;
+  }
+  // --- 管理指令结束 ---
 
   // 转发管理员消息给用户
   if (msg.media_group_id) {
