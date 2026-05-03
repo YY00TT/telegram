@@ -378,16 +378,12 @@ async function checkRateLimit(userId, env, action = 'message', limit = 20, windo
 
 /**
  * 获取屏蔽词列表（带实例内缓存）
- * @param {object} env - 环境变量
- * @returns {Promise<string[]>} 屏蔽词数组
  */
 async function getBlockedKeywords(env) {
     const now = Date.now();
-    // 优先使用实例缓存
     if (blocklistCache.data !== null && (now - blocklistCache.ts < blocklistCache.TTL_MS)) {
         return blocklistCache.data;
     }
-
     try {
         const raw = await env.TOPIC_MAP.get("blocklist", { type: "json" });
         const keywords = Array.isArray(raw) ? raw : [];
@@ -402,8 +398,6 @@ async function getBlockedKeywords(env) {
 
 /**
  * 保存屏蔽词列表到 KV 并刷新缓存
- * @param {object} env - 环境变量
- * @param {string[]} keywords - 屏蔽词数组
  */
 async function saveBlockedKeywords(env, keywords) {
     await env.TOPIC_MAP.put("blocklist", JSON.stringify(keywords));
@@ -412,7 +406,7 @@ async function saveBlockedKeywords(env, keywords) {
 }
 
 /**
- * 使屏蔽词缓存失效（增删改后调用）
+ * 使屏蔽词缓存失效
  */
 function invalidateBlocklistCache() {
     blocklistCache.data = null;
@@ -421,8 +415,6 @@ function invalidateBlocklistCache() {
 
 /**
  * 检查消息文本是否触发屏蔽词
- * @param {string} text - 消息文本
- * @param {string[]} keywords - 屏蔽词列表
  * @returns {string|null} 命中的屏蔽词，未命中返回 null
  */
 function checkMessageAgainstBlocklist(text, keywords) {
@@ -439,15 +431,10 @@ function checkMessageAgainstBlocklist(text, keywords) {
 
 /**
  * 对用户执行屏蔽词触发的封禁（与 /ban 相同逻辑）
- * @param {number} userId - 用户ID
- * @param {string} matchedKeyword - 命中的屏蔽词
- * @param {object} env - 环境变量
  */
 async function banUserForBlocklist(userId, matchedKeyword, env) {
     await env.TOPIC_MAP.put(`banned:${userId}`, "1");
     Logger.info('user_banned_by_blocklist', { userId, matchedKeyword });
-
-    // 通知用户已被封禁
     try {
         await tgCall(env, "sendMessage", {
             chat_id: userId,
@@ -460,21 +447,9 @@ async function banUserForBlocklist(userId, matchedKeyword, env) {
 
 /**
  * 处理屏蔽词管理命令
- * 支持的子命令：
- *   /blocklist              - 显示所有屏蔽词
- *   /blocklist list         - 显示所有屏蔽词
- *   /blocklist add <词>     - 添加屏蔽词
- *   /blocklist del <词>     - 删除屏蔽词
- *   /blocklist remove <词>  - 删除屏蔽词（del 的别名）
- *   /blocklist clear        - 清空所有屏蔽词
- *
- * @param {string} text - 完整命令文本
- * @param {number|null} threadId - 当前话题ID
- * @param {object} env - 环境变量
- * @returns {Promise<boolean>} 是否处理了该命令
+ * /blocklist [list|add|del|remove|clear]
  */
 async function handleBlocklistCommand(text, threadId, env) {
-    // 匹配 /blocklist 开头的命令
     const match = text.match(/^\/blocklist(?:\s+(.*))?$/i);
     if (!match) return false;
 
@@ -487,7 +462,7 @@ async function handleBlocklistCommand(text, threadId, env) {
         }, threadId));
     };
 
-    // --- /blocklist 或 /blocklist list：显示所有屏蔽词 ---
+    // --- list ---
     if (!subCommand || subCommand.toLowerCase() === "list") {
         const keywords = await getBlockedKeywords(env);
         if (keywords.length === 0) {
@@ -500,7 +475,7 @@ async function handleBlocklistCommand(text, threadId, env) {
         return true;
     }
 
-    // --- /blocklist add <关键词> ---
+    // --- add ---
     const addMatch = subCommand.match(/^add\s+(.+)$/i);
     if (addMatch) {
         const keyword = addMatch[1].trim();
@@ -512,20 +487,16 @@ async function handleBlocklistCommand(text, threadId, env) {
             await sendReply(`❌ 关键词长度不能超过 ${CONFIG.BLOCKLIST_MAX_KEYWORD_LENGTH} 个字符。`);
             return true;
         }
-
         const keywords = await getBlockedKeywords(env);
-        // 检查是否已存在（不区分大小写）
         const exists = keywords.some(kw => kw.toLowerCase() === keyword.toLowerCase());
         if (exists) {
             await sendReply(`⚠️ 关键词 \`${keyword}\` 已存在于屏蔽词列表中。`);
             return true;
         }
-
         if (keywords.length >= CONFIG.BLOCKLIST_MAX_KEYWORDS) {
             await sendReply(`❌ 屏蔽词列表已满（最多 ${CONFIG.BLOCKLIST_MAX_KEYWORDS} 个）。请先删除一些再添加。`);
             return true;
         }
-
         keywords.push(keyword);
         await saveBlockedKeywords(env, keywords);
         Logger.info('blocklist_keyword_added', { keyword, totalCount: keywords.length });
@@ -533,7 +504,7 @@ async function handleBlocklistCommand(text, threadId, env) {
         return true;
     }
 
-    // --- /blocklist del <关键词> 或 /blocklist remove <关键词> ---
+    // --- del / remove ---
     const delMatch = subCommand.match(/^(?:del|remove)\s+(.+)$/i);
     if (delMatch) {
         const keyword = delMatch[1].trim();
@@ -541,29 +512,26 @@ async function handleBlocklistCommand(text, threadId, env) {
             await sendReply("❌ 请指定要删除的关键词。\n用法: `/blocklist del <关键词>`");
             return true;
         }
-
         const keywords = await getBlockedKeywords(env);
-        const index = keywords.findIndex(kw => kw.toLowerCase() === keyword.toLowerCase());
-        if (index === -1) {
-            await sendReply(`⚠️ 未找到关键词 \`${keyword}\`。`);
+        const idx = keywords.findIndex(kw => kw.toLowerCase() === keyword.toLowerCase());
+        if (idx === -1) {
+            await sendReply(`⚠️ 关键词 \`${keyword}\` 不存在于屏蔽词列表中。`);
             return true;
         }
-
-        const removed = keywords.splice(index, 1)[0];
+        const removed = keywords.splice(idx, 1)[0];
         await saveBlockedKeywords(env, keywords);
         Logger.info('blocklist_keyword_removed', { removed, totalCount: keywords.length });
         await sendReply(`✅ 已删除屏蔽词: \`${removed}\`\n当前共 ${keywords.length} 个屏蔽词。`);
         return true;
     }
 
-    // --- /blocklist clear ---
+    // --- clear ---
     if (subCommand.toLowerCase() === "clear") {
         const keywords = await getBlockedKeywords(env);
         if (keywords.length === 0) {
             await sendReply("⚠️ 屏蔽词列表已经是空的。");
             return true;
         }
-
         await saveBlockedKeywords(env, []);
         Logger.info('blocklist_cleared', { previousCount: keywords.length });
         await sendReply(`✅ 已清空屏蔽词列表（共删除 ${keywords.length} 个）。`);
@@ -575,7 +543,6 @@ async function handleBlocklistCommand(text, threadId, env) {
     return true;
 }
 
-// ==================== 主入口 ====================
 
 export default {
   async fetch(request, env, ctx) {
@@ -697,6 +664,7 @@ async function handlePrivateMessage(msg, env, ctx) {
     await sendVerificationChallenge(userId, env, pendingMsgId);
     return;
   }
+
 
   // --- 屏蔽词检查（仅对已验证用户的消息生效） ---
   const messageText = msg.text || msg.caption || "";
@@ -931,7 +899,7 @@ async function handleAdminReply(msg, env, ctx) {
 
   // 【修复】允许在任何话题执行 /cleanup 命令
   if (text === "/cleanup") {
-      // /cleanup 可能处理较久，使用 waitUntil 防止 webhook 请求超时导致"卡住"
+      // /cleanup 可能处理较久，使用 waitUntil 防止 webhook 请求超时导致“卡住”
       ctx.waitUntil(handleCleanupCommand(threadId, env));
       return;
   }
@@ -959,7 +927,7 @@ async function handleAdminReply(msg, env, ctx) {
   }
 
   // 如果找不到用户，说明可能是在普通话题，或者数据丢失，直接返回
-  if (!userId) return;
+  if (!userId) return; 
 
   // --- 指令区域 ---
 
@@ -1226,9 +1194,6 @@ async function handleCallbackQuery(query, env, ctx) {
                         pendingIds = pendingIds.slice(pendingIds.length - CONFIG.PENDING_MAX_MESSAGES);
                     }
 
-                    // 暂存消息是在用户通过验证之前发送的，按需求不做屏蔽词检查。
-                    // 屏蔽词检查仅在 handlePrivateMessage 中对已验证用户的新消息生效。
-                    // 但如果用户在验证期间已被其他方式封禁，则跳过转发。
                     let forwardedCount = 0;
                     for (const pendingId of pendingIds) {
                         if (!pendingId) continue;
@@ -1734,7 +1699,7 @@ async function delaySend(env, key, ts) {
             }
             // 【修复 #28】限制 caption 长度
             const caption = i === 0 ? (it.cap || "").substring(0, 1024) : "";
-            return {
+            return { 
                 type: it.type,
                 media: it.id,
                 caption
